@@ -1,5 +1,5 @@
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
-import type { FaceSample } from './projection';
+import { extractTrackingSample, type TrackingSample } from './gaze';
 
 export class HeadTracker {
   private landmarker?: FaceLandmarker;
@@ -12,7 +12,7 @@ export class HeadTracker {
 
   constructor(
     private video: HTMLVideoElement,
-    private onSample: (sample: FaceSample | null) => void,
+    private onSample: (sample: TrackingSample | null) => void,
     private onError: (error: unknown) => void,
   ) {}
 
@@ -25,7 +25,7 @@ export class HeadTracker {
       // Request permission before loading the model; denied permission does no extra work.
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
-        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30, max: 30 } },
+        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
       });
       if (generation !== this.generation) { stream.getTracks().forEach(track => track.stop()); return false; }
       this.stream = stream;
@@ -41,7 +41,7 @@ export class HeadTracker {
         minFacePresenceConfidence: 0.55,
         minTrackingConfidence: 0.55,
         outputFaceBlendshapes: false,
-        outputFacialTransformationMatrixes: false,
+        outputFacialTransformationMatrixes: true,
       };
       try { this.landmarker = await FaceLandmarker.createFromOptions(files, options); }
       catch { this.landmarker = await FaceLandmarker.createFromOptions(files, { ...options, baseOptions: { ...options.baseOptions, delegate: 'CPU' } }); }
@@ -63,18 +63,14 @@ export class HeadTracker {
   private detect = (time: number) => {
     if (!this.running) return;
     this.frame = requestAnimationFrame(this.detect);
-    if (document.hidden || time - this.lastDetectTime < 50 || this.video.readyState < 2 || this.video.currentTime === this.lastVideoTime) return;
+    if (document.hidden || time - this.lastDetectTime < 40 || this.video.readyState < 2 || this.video.currentTime === this.lastVideoTime) return;
     this.lastDetectTime = time;
     this.lastVideoTime = this.video.currentTime;
     try {
-      const face = this.landmarker!.detectForVideo(this.video, time).faceLandmarks[0];
+      const result = this.landmarker!.detectForVideo(this.video, time);
+      const face = result.faceLandmarks[0];
       if (!face) { this.onSample(null); return; }
-      const left = face[33], right = face[263];
-      this.onSample({
-        x: (left.x + right.x) / 2,
-        y: (left.y + right.y) / 2,
-        span: Math.hypot(left.x - right.x, (left.y - right.y) * this.video.videoHeight / this.video.videoWidth),
-      });
+      this.onSample(extractTrackingSample(face, this.video.videoHeight / this.video.videoWidth, result.facialTransformationMatrixes[0]?.data));
     } catch (error) { this.stop(); this.onError(error); }
   };
 

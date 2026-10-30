@@ -2,6 +2,8 @@ import './style.css';
 import { PortalScene, type WorldName } from './scene';
 import { clamp, faceToEye, type FaceSample } from './projection';
 import type { HeadTracker } from './head-tracker';
+import { gazeFeatures, predictGaze, OneEuroFilter, type GazeModel, type GazePoint, type TrackingSample } from './gaze';
+import { GazeCalibration } from './calibration';
 
 const icons = {
   window: '<rect x="4" y="3" width="12" height="15"/><rect x="9" y="8" width="12" height="15"/>',
@@ -71,18 +73,21 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
           <p class="status-message" id="status-message" role="status"><span class="status-dot"></span><span id="status-text">鼠标预览已就绪 · 将指针移入空间</span></p>
           <span class="privacy-note">${icon('shield')}影像仅在本机处理，不录制、不上传</span>
         </div>
+        <div class="gaze-controls"><span class="focus-lock">${icon('target')}定焦 · 前后缩放已锁定</span><button id="gaze-calibrate-button" class="gaze-calibrate-button" disabled>${icon('target')}九点视线校准</button><label class="gaze-toggle"><input id="show-gaze" type="checkbox" checked/>显示估计落点 / 射线</label></div>
+        <div class="tracking-diagnostics" id="tracking-diagnostics" hidden><span id="landmark-metric">等待特征点</span><span id="gaze-metric">视线尚未校准</span><span id="ray-metric">虚拟射线：—</span><span id="fit-metric">先校准，再检查估计落点</span></div>
       </section>
 
       <section class="field-notes" aria-label="体验指南">
         <div class="field-note"><span class="step-number">01</span><div><h2>给空间一个新视角</h2><p>左右或上下移动，发现边框后藏着的物体。</p></div></div>
         <div class="field-note"><span class="step-number">02</span><div><h2>让身体成为控制器</h2><p>开启摄像头，坐在正前方，让视角跟随你的头。</p></div></div>
-        <div class="field-note"><span class="step-number">03</span><div><h2>靠近一点，再远一点</h2><p>前后轻移，感受屏幕背后真实的空间纵深。</p></div></div>
+        <div class="field-note"><span class="step-number">03</span><div><h2>让视线穿过屏幕</h2><p>完成九点校准，查看估计的视线落点和空间射线。</p></div></div>
       </section>
     </main>
     <footer><span>A SMALL WINDOW. ANOTHER WORLD.</span><span>用好奇心，打破第四面墙 <span class="footer-cross">↗</span></span></footer>
   </div>
-  <div class="camera-preview" id="camera-preview" hidden><video id="tracking-video" muted playsinline></video><div class="camera-crosshair"></div><span id="tracking-label">正在寻找你</span><button id="close-camera" aria-label="关闭摄像头">${icon('close')}</button></div>
-  <dialog id="about-dialog" aria-labelledby="about-title"><div class="dialog-content"><button class="dialog-close" id="close-about" aria-label="关闭">${icon('close')}</button><p class="eyebrow">BEYOND THE FRAME</p><h2 id="about-title">一块屏幕，<br>一个新的空间。</h2><p>想象显示器是一扇真实的窗户。你的头移向一侧，就能看见原本被窗框遮住的地方。</p><p>这里使用固定屏幕平面的非对称透视投影。摄像头只用来估算双眼的位置：左右、上下、前后，都会改变窗后的视角。没有摄像头时，也能用鼠标或方向键探索。</p><div class="dialog-tip">${icon('target')}首次开启后看向屏幕中央，点击「校准中心」。光线充足、面部完整入镜时效果更好。普通显示器呈现的是运动视差，无需 3D 眼镜。</div><div class="keyboard-shortcuts"><span><kbd>R</kbd>复位</span><span><kbd>F</kbd>全屏</span><span><kbd>↑ ↓ ← →</kbd>探索</span></div><p class="dialog-privacy">${icon('shield')}视频在浏览器内实时处理，关闭后立即停止摄像头。</p></div></dialog>
+  <div class="camera-preview" id="camera-preview" hidden><video id="tracking-video" muted playsinline></video><canvas id="landmarks-overlay" width="640" height="480"></canvas><div class="camera-crosshair"></div><span id="tracking-label">正在寻找你</span><button id="close-camera" aria-label="关闭摄像头">${icon('close')}</button></div>
+  <div id="gaze-cursor" class="gaze-cursor" hidden aria-hidden="true"><span>估计视线</span></div>
+  <dialog id="about-dialog" aria-labelledby="about-title"><div class="dialog-content"><button class="dialog-close" id="close-about" aria-label="关闭">${icon('close')}</button><p class="eyebrow">BEYOND THE FRAME</p><h2 id="about-title">一块屏幕，<br>一个新的空间。</h2><p>想象显示器是一扇真实的窗户。你的头移向一侧，就能看见原本被窗框遮住的地方。</p><p>头部平移改变窗后的透视，虚拟焦距和观看距离固定，前后移动不再缩放。完成九点校准后，虹膜与面部姿态用于估计你在页面上的注视位置，再把它变成穿过屏幕、射入虚拟空间的射线。</p><div class="dialog-tip">${icon('target')}先点击「校准中心」，再完成「九点视线校准」。保持头部相对稳定，只用眼睛注视圆点。绿色圆点为估计落点；普通摄像头无法保证逐像素准确。窗口尺寸或坐姿明显改变后，请重新校准。</div><div class="keyboard-shortcuts"><span><kbd>R</kbd>复位</span><span><kbd>F</kbd>全屏</span><span><kbd>↑ ↓ ← →</kbd>探索</span></div><p class="dialog-privacy">${icon('shield')}视频和个人校准数据只在本机处理，关闭摄像头后清除。</p></div></dialog>
 `;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -93,11 +98,23 @@ let mode: 'pointer' | 'head' = 'pointer';
 let cameraState: 'off' | 'starting' | 'on' = 'off';
 let sensitivity = 1;
 let center: FaceSample | null = null;
-let latestFace: FaceSample | null = null;
+let latestFace: TrackingSample | null = null;
 let lastFaceAt = 0;
 let calibratedAutomatically = false;
 let cameraGeneration = 0;
 let pointer = { x: 0, y: 0 };
+let gazeModel: GazeModel | null = null;
+let gazePoint: GazePoint | null = null;
+let lastDiagnosticsAt = 0;
+const headFilterX = new OneEuroFilter(3, 0.7), headFilterY = new OneEuroFilter(3, 0.7);
+const gazeFilterX = new OneEuroFilter(1.6, 0.5), gazeFilterY = new OneEuroFilter(1.6, 0.5);
+const calibration = new GazeCalibration(model => {
+  gazeModel = model;
+  gazeFilterX.reset(); gazeFilterY.reset();
+  $('fit-metric').textContent = `校准拟合误差 ${Math.round(model.fitError)} 页面px（非实际精度）`;
+  $('gaze-calibrate-button').innerHTML = `${icon('target')}重新校准视线`;
+  status('九点视线校准完成 · 绿色圆点是估计落点，头部移动控制窗口视差');
+}, () => { $('gaze-cursor').hidden = true; });
 
 function status(message: string, state: 'ready' | 'warning' | 'error' = 'ready') {
   if ($('status-text').textContent !== message) $('status-text').textContent = message;
@@ -107,6 +124,11 @@ function status(message: string, state: 'ready' | 'warning' | 'error' = 'ready')
 try {
   scene = new PortalScene(portal);
   scene.onFrame = (_eye, fps) => { $('fps').textContent = String(Math.min(fps, 144)); };
+  scene.onRay = (ray, hitDistance) => {
+    if (!ray) { $('ray-metric').textContent = '虚拟射线：—'; return; }
+    const n = ray.direction;
+    $('ray-metric').textContent = `射线方向 (${n.x.toFixed(3)}, ${n.y.toFixed(3)}, ${n.z.toFixed(3)})${hitDistance ? ` · 命中 ${hitDistance.toFixed(1)}` : ''}`;
+  };
   scene.renderer.domElement.addEventListener('webglcontextlost', (event) => {
     event.preventDefault();
     stopCamera();
@@ -146,10 +168,46 @@ function setMode(next: 'pointer' | 'head') {
   if (next === 'pointer') { scene?.reset(); status('鼠标预览已就绪 · 将指针移入空间'); }
 }
 
-function sample(face: FaceSample | null) {
+function updateGazeRay() {
+  const enabled = $<HTMLInputElement>('show-gaze').checked && mode === 'head' && !calibration.open;
+  const visible = enabled && gazePoint && gazePoint.u >= 0 && gazePoint.u <= 1 && gazePoint.v >= 0 && gazePoint.v <= 1;
+  $('gaze-cursor').hidden = !visible;
+  if (!visible || !gazePoint) { scene?.setGaze(null); return; }
+  const x = gazePoint.u * window.innerWidth, y = gazePoint.v * window.innerHeight;
+  $('gaze-cursor').style.left = `${x}px`; $('gaze-cursor').style.top = `${y}px`;
+  const rect = portal.getBoundingClientRect();
+  const u = (x - rect.left - portal.clientLeft) / portal.clientWidth;
+  const v = (y - rect.top - portal.clientTop) / portal.clientHeight;
+  scene?.setGaze(u >= 0 && u <= 1 && v >= 0 && v <= 1 ? { u, v } : null);
+}
+
+function drawLandmarks(face: TrackingSample) {
+  const video = $<HTMLVideoElement>('tracking-video');
+  const canvas = $<HTMLCanvasElement>('landmarks-overlay');
+  if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) { canvas.width = video.videoWidth || 640; canvas.height = video.videoHeight || 480; }
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#d9e9ab77';
+  for (const point of face.landmarks) { ctx.beginPath(); ctx.arc(point.x * canvas.width, point.y * canvas.height, 1, 0, Math.PI * 2); ctx.fill(); }
+  ctx.strokeStyle = face.eyes?.valid ? '#dfff82' : '#e6b384'; ctx.lineWidth = 2;
+  for (const indices of [[33, 160, 159, 158, 133, 153, 145, 144, 33], [362, 385, 386, 387, 263, 373, 374, 380, 362], [469, 470, 471, 472, 469], [474, 475, 476, 477, 474]]) {
+    ctx.beginPath();
+    indices.forEach((index, i) => { const point = face.landmarks[index]; if (!point) return; if (i === 0) ctx.moveTo(point.x * canvas.width, point.y * canvas.height); else ctx.lineTo(point.x * canvas.width, point.y * canvas.height); });
+    ctx.stroke();
+  }
+}
+
+function sample(face: TrackingSample | null) {
+  const now = performance.now();
+  calibration.feed(face, now);
   latestFace = face;
   $<HTMLButtonElement>('calibrate-button').disabled = !face || mode !== 'head';
+  $<HTMLButtonElement>('gaze-calibrate-button').disabled = cameraState !== 'on' || !face?.eyes;
   if (!face) {
+    gazePoint = null; updateGazeRay();
+    const overlay = $<HTMLCanvasElement>('landmarks-overlay');
+    overlay.getContext('2d')?.clearRect(0, 0, overlay.width, overlay.height);
+    $('gaze-metric').textContent = '未检测到人脸，暂停视线';
     if (performance.now() - lastFaceAt > 700) {
       $('tracking-label').textContent = '未检测到人脸';
       $('camera-preview').dataset.tracking = 'lost';
@@ -159,11 +217,25 @@ function sample(face: FaceSample | null) {
   }
   lastFaceAt = performance.now();
   $('camera-preview').dataset.tracking = 'active';
-  $('tracking-label').textContent = '正在跟随你';
-  if (!center) { center = { ...face }; calibratedAutomatically = true; }
+  $('tracking-label').textContent = face.eyes?.valid ? '虹膜 + 面部姿态 · 定焦' : '双眼暂不可用 · 视线暂停';
+  drawLandmarks(face);
+  if (!center) { center = { x: face.x, y: face.y, span: face.span }; calibratedAutomatically = true; }
+  const features = gazeFeatures(face);
+  if (gazeModel && features && !calibration.open) {
+    const point = predictGaze(gazeModel, features);
+    gazePoint = { u: gazeFilterX.filter(point.u, now), v: gazeFilterY.filter(point.v, now) };
+  } else gazePoint = null;
+  updateGazeRay();
+  if (now - lastDiagnosticsAt > 200) {
+    const degrees = (value: number) => Math.round(value * 180 / Math.PI);
+    $('landmark-metric').textContent = `${face.landmarks.length} 点 · 头部 yaw ${degrees(face.pose.yaw)}° / pitch ${degrees(face.pose.pitch)}° · Z 6.00`;
+    $('gaze-metric').textContent = gazePoint ? `估计落点 (${Math.round(gazePoint.u * window.innerWidth)}, ${Math.round(gazePoint.v * window.innerHeight)}) 页面px` : !gazeModel ? '视线尚未校准' : '眨眼 / 虹膜不可用，暂停视线';
+    lastDiagnosticsAt = now;
+  }
   if (mode === 'head') {
-    if (scene) Object.assign(scene.target, faceToEye(face, center, sensitivity));
-    status(calibratedAutomatically ? '追踪中 · 已自动居中，可点击「校准中心」重新定位' : '追踪中 · 试着向左右、上下或前后轻移');
+    const eye = faceToEye(face, center, sensitivity);
+    if (scene) Object.assign(scene.target, { x: headFilterX.filter(eye.x, now), y: headFilterY.filter(eye.y, now), z: 6 });
+    if (!calibration.open) status(gazeModel ? '定焦追踪中 · 头部平移控制视差，绿色圆点显示估计视线' : calibratedAutomatically ? '定焦追踪中 · 可校准中心，或进行九点视线校准' : '定焦追踪中 · 左右、上下移动，前后不再缩放');
   }
 }
 
@@ -193,6 +265,7 @@ async function startCamera() {
     if (!started || generation !== cameraGeneration) return;
     cameraState = 'on';
     $('camera-preview').hidden = false;
+    $('tracking-diagnostics').hidden = false;
     $('camera-button').classList.remove('loading');
     $('camera-button').classList.add('camera-on');
     $('camera-button').innerHTML = `${icon('camera')}<span>关闭摄像头</span><span class="camera-on-dot"></span>`;
@@ -207,6 +280,14 @@ function stopCamera(updateStatus = true) {
   tracker = undefined;
   cameraState = 'off';
   center = latestFace = null;
+  gazeModel = null; gazePoint = null;
+  calibration.close();
+  headFilterX.reset(); headFilterY.reset(); gazeFilterX.reset(); gazeFilterY.reset();
+  $('gaze-cursor').hidden = true; scene?.setGaze(null);
+  $<HTMLButtonElement>('gaze-calibrate-button').disabled = true;
+  $('gaze-calibrate-button').innerHTML = `${icon('target')}九点视线校准`;
+  $('tracking-diagnostics').hidden = true;
+  $('fit-metric').textContent = '先校准，再检查估计落点';
   calibratedAutomatically = false;
   $('camera-preview').hidden = true;
   $('camera-button').classList.remove('loading', 'camera-on');
@@ -217,7 +298,8 @@ function stopCamera(updateStatus = true) {
 
 function calibrate() {
   if (mode === 'head' && latestFace) {
-    center = { ...latestFace };
+    center = { x: latestFace.x, y: latestFace.y, span: latestFace.span };
+    headFilterX.reset(); headFilterY.reset();
     calibratedAutomatically = false;
     scene?.reset();
     status('中心已校准 · 现在可以自然移动头部了');
@@ -234,6 +316,21 @@ $('pointer-button').addEventListener('click', () => { if (cameraState !== 'off')
 $('close-camera').addEventListener('click', () => stopCamera());
 $('calibrate-button').addEventListener('click', calibrate);
 $('reset-button').addEventListener('click', calibrate);
+$('gaze-calibrate-button').addEventListener('click', () => {
+  if (cameraState !== 'on') return;
+  $('gaze-cursor').hidden = true; scene?.setGaze(null);
+  calibration.show();
+});
+$('show-gaze').addEventListener('change', updateGazeRay);
+window.addEventListener('scroll', updateGazeRay, { passive: true });
+window.addEventListener('resize', () => {
+  if (gazeModel && (gazeModel.width !== window.innerWidth || gazeModel.height !== window.innerHeight)) {
+    gazeModel = null; gazePoint = null; updateGazeRay();
+    $('fit-metric').textContent = '窗口尺寸已改变，请重新进行九点视线校准';
+    status('窗口尺寸已改变 · 视线需要重新校准，头部视差仍可使用', 'warning');
+  }
+  calibration.close();
+});
 $<HTMLInputElement>('sensitivity').addEventListener('input', event => {
   sensitivity = Number((event.target as HTMLInputElement).value);
   $('sensitivity-value').textContent = `${sensitivity.toFixed(1)}×`;
@@ -268,7 +365,7 @@ $('about-button').addEventListener('click', () => dialog.showModal());
 $('close-about').addEventListener('click', () => dialog.close());
 dialog.addEventListener('click', event => { if (event.target === dialog) dialog.close(); });
 document.addEventListener('keydown', event => {
-  if (dialog.open || event.target instanceof HTMLInputElement || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (dialog.open || calibration.open || event.target instanceof HTMLInputElement || event.ctrlKey || event.metaKey || event.altKey) return;
   if (event.key.toLowerCase() === 'r') calibrate();
   if (event.key.toLowerCase() === 'f') void fullscreen();
   if (mode !== 'pointer' || document.activeElement !== portal) return;

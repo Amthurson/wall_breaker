@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { clamp, screenFrustum, type EyePosition } from './projection';
+import { FIXED_EYE_DISTANCE, screenFrustum, screenRay, type EyePosition } from './projection';
 
 export type WorldName = 'gallery' | 'cosmos';
 
@@ -24,10 +24,15 @@ export class PortalScene {
   private frame = 0;
   private lastTime = 0;
   private lastMetric = 0;
+  private lastRay = 0;
   private frameCount = 0;
   private world: WorldName = 'gallery';
+  private gaze: { u: number; v: number } | null = null;
+  private hitMarker = new THREE.Mesh(new THREE.SphereGeometry(0.06, 16, 12), new THREE.MeshBasicMaterial({ color: '#e3ff9d', depthTest: false }));
+  private raycaster = new THREE.Raycaster();
   private observer: ResizeObserver;
   onFrame?: (eye: EyePosition, fps: number) => void;
+  onRay?: (ray: ReturnType<typeof screenRay> | null, hitDistance: number | null) => void;
 
   constructor(private container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
@@ -57,6 +62,9 @@ export class PortalScene {
     this.makeRoom();
     this.makeCosmos();
     this.scene.add(this.room, this.sculptures, this.cosmos);
+    this.hitMarker.visible = false;
+    this.hitMarker.renderOrder = 1000;
+    this.scene.add(this.hitMarker);
     this.cosmos.visible = false;
     this.observer = new ResizeObserver(() => this.resize());
     this.observer.observe(container);
@@ -224,6 +232,24 @@ export class PortalScene {
     (this.scene.fog as THREE.FogExp2).density = world === 'gallery' ? 0.019 : 0.008;
   }
 
+  setGaze(point: { u: number; v: number } | null) {
+    this.gaze = point;
+    if (!point) this.hitMarker.visible = false;
+  }
+
+  private updateGazeRay() {
+    if (!this.gaze) { this.hitMarker.visible = false; this.onRay?.(null, null); return; }
+    const ray = screenRay(this.eye, this.halfHeight * this.width / this.height, this.halfHeight, this.gaze.u, this.gaze.v);
+    this.raycaster.set(new THREE.Vector3(ray.origin.x, ray.origin.y, ray.origin.z), new THREE.Vector3(ray.direction.x, ray.direction.y, ray.direction.z));
+    const hit = this.raycaster.intersectObjects(this.world === 'gallery' ? [this.room, this.sculptures] : [this.cosmos], true).find(item => item.object instanceof THREE.Mesh);
+    this.hitMarker.visible = Boolean(hit);
+    if (hit) {
+      this.hitMarker.position.copy(hit.point);
+      this.hitMarker.scale.setScalar(Math.max(0.7, hit.distance * 0.08));
+    }
+    this.onRay?.(ray, hit?.distance ?? null);
+  }
+
   private resize() {
     this.width = Math.max(this.container.clientWidth, 1);
     this.height = Math.max(this.container.clientHeight, 1);
@@ -240,15 +266,16 @@ export class PortalScene {
     this.frame = requestAnimationFrame(this.animate);
     const dt = this.lastTime ? Math.min((time - this.lastTime) / 1000, 0.1) : 0.016;
     this.lastTime = time;
-    const smoothing = 1 - Math.exp(-12 * dt);
+    const smoothing = 1 - Math.exp(-18 * dt);
     for (const axis of ['x', 'y', 'z'] as const) this.eye[axis] += (this.target[axis] - this.eye[axis]) * smoothing;
-    this.eye.z = clamp(this.eye.z, 3.2, 10);
+    this.eye.z = this.target.z = FIXED_EYE_DISTANCE;
     this.camera.position.set(this.eye.x, this.eye.y, this.eye.z);
     const f = screenFrustum(this.eye, this.halfHeight * this.width / this.height, this.halfHeight);
     this.camera.projectionMatrix.makePerspective(f.left, f.right, f.top, f.bottom, f.near, this.camera.far);
     this.camera.projectionMatrixInverse.copy(this.camera.projectionMatrix).invert();
     // Camera orientation stays parallel to the screen: never lookAt the scene center.
     if (this.world === 'cosmos') this.moon.rotation.y = time * 0.000025;
+    if (time - this.lastRay > 50) { this.updateGazeRay(); this.lastRay = time; }
     this.renderer.render(this.scene, this.camera);
     this.frameCount++;
     if (time - this.lastMetric > 200) {
